@@ -2,3 +2,7 @@ __pycache__/
 *.pyc
 *.groq.m4a
 *.srt
+# 生成物：词级时间戳、运行日志、差异清单
+*.words.json
+_run_*.log
+待核对差异清单.txt

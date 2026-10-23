@@ -47,11 +47,13 @@ def diff(a, b, name_a, name_b, limit=None):
             print("... 还有 %d 处未列出" % (len(ops) - n))
             break
         n += 1
-        left = a[max(0, al - 6):al]
-        right_a = a[ar:ar + 6]
-        x = a[al:ar]
-        y = b[bl:br]
-        print("%3d. %s [%s->%s] %s" % (n, left, x or "-", y or "-", right_a))
+        x, y = a[al:ar], b[bl:br]
+        left_a = a[max(0, al - 8):al]
+        right_a = a[ar:ar + 8]
+        left_b = b[max(0, bl - 8):bl]
+        right_b = b[br:br + 8]
+        print("%3d. 新版: %s【%s】%s" % (n, left_a, x or "-", right_a))
+        print("    原生: %s【%s】%s" % (left_b, y or "-", right_b))
     return len(ops), same, base
 
 
