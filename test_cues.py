@@ -15,6 +15,12 @@ def W(text, start, dur=0.3):
     return {"word": text, "start": start, "end": start + dur}
 
 
+def _split_cues(words, **kw):
+    """测试里的历史断言按 20 字上限设计（默认值后来对齐剪映改成了 12）。"""
+    kw.setdefault("max_chars", 20)
+    return gs._split_cues(words, **kw)
+
+
 def texts_of(cues):
     return [c["text"] for c in cues]
 
@@ -24,7 +30,8 @@ def widths_of(cues):
 
 
 def check(name, cond, extra=""):
-    print("[%s] %s%s" % ("OK" if cond else "FAIL", name, "  " + extra if extra else ""))
+    print("[%s] %s%s" % ("OK" if cond else "FAIL", name,
+                         "  " + str(extra) if extra else ""))
     if not cond:
         globals()["FAILED"] = True
 
@@ -41,10 +48,11 @@ words = [
     W("仪式", 4.6), W("。", 4.95),
     W("这些", 5.4), W("尊卑", 5.75), W("伦理", 6.1), W("。", 6.45),
 ]
-cues = gs._split_cues(words)
+cues = _split_cues(words)
 check("句末标点切成 3 条", len(cues) == 3, str(texts_of(cues)))
 check("第1条文本完整", cues[0]["text"] == "社会礼法天子既天地诸侯既善川百姓敬先祖。", cues[0]["text"])
-check("第1条时间=首尾词", (cues[0]["start"], cues[0]["end"]) == (0.0, 3.1), str(cues[0]))
+check("第1条时间=首尾词(+余韵 CUE_TAIL，钳到下条前 0.02)",
+      (cues[0]["start"], cues[0]["end"]) == (0.0, 3.18), str(cues[0]))
 check("第3条短句也独立", cues[2]["text"] == "这些尊卑伦理。", cues[2]["text"])
 
 # 超宽长句（28 字宽 > 20 上限）应被兜底切开，不堆成大块
@@ -53,7 +61,7 @@ long_words = [
     W("诸侯", 1.4), W("既善川", 1.75), W("百姓", 2.1), W("敬先祖", 2.45),
     W("大到", 2.8), W("王室的", 3.15), W("交四小", 3.5), W("。", 3.85),
 ]
-cues_long = gs._split_cues(long_words)
+cues_long = _split_cues(long_words)
 check("超宽长句被切开", len(cues_long) == 2, str(texts_of(cues_long)))
 check("超宽长句每块不超宽", all(w <= 20.0001 for w in widths_of(cues_long)),
       str(widths_of(cues_long)))
@@ -65,13 +73,13 @@ words = [
     W("再也没有", 1.2), W("回头", 1.5), W("看过", 1.8), W("一眼", 2.1),   # end=2.4
     W("后来", 3.6), W("人们", 3.9), W("再也没", 4.2), W("见过他", 4.5),  # 3.6-2.4=1.2s 静音
 ]
-cues = gs._split_cues(words)
+cues = _split_cues(words)
 check("气口切成 2 条", len(cues) == 2, str(texts_of(cues)))
 check("气口断在第2条开头", cues[1]["start"] == 3.6, str(cues[1]))
 
 # ============ 3. 短气口不断（<0.7s） ============
 words = [W("啊", 0.0), W("那个", 0.35), W("我想", 0.75), W("说的是", 1.1)]
-cues = gs._split_cues(words)
+cues = _split_cues(words)
 check("0.4s 间隔不断开", len(cues) == 1, str(texts_of(cues)))
 
 # ============ 4. 逗号过半断开 ============
@@ -82,7 +90,7 @@ words = [
     W("渐渐", 1.7), W("习惯了", 2.0), W("这套", 2.3), W("秩序，", 2.6),
     W("不再", 3.0), W("追问", 3.3), W("为什么", 3.6), W("。", 3.9),
 ]
-cues = gs._split_cues(words)
+cues = _split_cues(words)
 check("逗号处断开", len(cues) == 2, str(texts_of(cues)))
 check("第1条停在第一个逗号", cues[0]["text"].endswith("中，") and "渐渐" not in cues[0]["text"], cues[0]["text"])
 
@@ -93,7 +101,7 @@ t = 0.0
 for i in range(12):
     words.append(W("词语%d" % i, t))
     t += 0.35
-cues = gs._split_cues(words, max_chars=20)
+cues = _split_cues(words, max_chars=20)
 check("无标点长串全部不超宽", all(w <= 20.0001 for w in widths_of(cues)), str(widths_of(cues)))
 check("无标点长串切成多条", len(cues) >= 2, str(texts_of(cues)))
 check("文本无丢失", "".join(texts_of(cues)) == "".join(w["word"] for w in words))
@@ -102,7 +110,7 @@ check("文本无丢失", "".join(texts_of(cues)) == "".join(w["word"] for w in w
 words = [W("甲", 0.0), W("乙", 0.3), W("丙", 0.6), W("丁", 0.9), W("戊", 1.2),
          W("己", 1.5), W("庚", 1.8), W("辛", 2.1), W("壬", 2.4), W("癸", 2.7),
          W("甲", 3.0), W("乙", 3.3), W("丙", 3.6), W("丁", 3.9), W("戊", 4.2)]
-cues = gs._split_cues(words, max_chars=6)
+cues = _split_cues(words, max_chars=6)
 check("纯单字硬切不超宽", all(w <= 6.0001 for w in widths_of(cues)), str(widths_of(cues)))
 check("硬切后文本完整", "".join(texts_of(cues)) == "甲乙丙丁戊己庚辛壬癸甲乙丙丁戊")
 
@@ -110,14 +118,14 @@ check("硬切后文本完整", "".join(texts_of(cues)) == "甲乙丙丁戊己庚
 # 每词 1.5s（慢速朗读），第 3 个词起累计超 7s -> 断
 words = [W("慢慢的", 0.0, 1.5), W("他说", 1.6, 1.5), W("出了一", 3.2, 1.5),
          W("口气", 4.8, 1.5), W("然后", 6.4, 1.5), W("继续", 8.0, 1.5)]
-cues = gs._split_cues(words, max_chars=100, max_dur=7.0)
+cues = _split_cues(words, max_chars=100, max_dur=7.0)
 check("时长上限生效", all(c["end"] - c["start"] <= 7.0 + 1e-6 for c in cues),
       str([(c["start"], c["end"]) for c in cues]))
 
 # ============ 8. 最小时长 + 不重叠 ============
 # 一个极短句（0.2s），应被拉到 >=1.0s；且不越过下一条
 words = [W("好。", 0.0, 0.2), W("我们", 1.0, 0.3), W("开始。", 1.35, 0.4)]
-cues = gs._split_cues(words)
+cues = _split_cues(words)
 check("最短时长 >= 1.0s", all(c["end"] - c["start"] >= 0.999 for c in cues),
       str([(c["start"], c["end"], c["text"]) for c in cues]))
 check("相邻条不重叠", all(cues[i]["end"] <= cues[i + 1]["start"] - 0.019
@@ -165,6 +173,43 @@ words = [W("Hello", 0.0), W("world", 0.3), W("你好", 0.6), W("世界", 0.9)]
 check("英文宽度 0.55", abs(gs._display_width("Hello") - 0.55 * 5) < 1e-9,
       str(gs._display_width("Hello")))
 check("中文宽度 1", gs._display_width("你好") == 2.0)
+
+# ============ 12. 默认单行字数对齐剪映（12 字） ============
+check("默认单行上限 = 10（实测剪映原生 6-10 字的主流区间）", gs.CUE_MAX_CHARS == 10,
+      str(gs.CUE_MAX_CHARS))
+
+# ============ 13. 巨型词二次切分（Groq 不返回 words 的退化路径） ============
+# 实测旧草稿里有 223 字 / 59 秒的单条字幕，就是这里没切
+monster = ("社会礼法天子祭天地诸侯祭山川百姓敬先祖大到王室的祭祀小到民间"
+           "家家户户的祭祖仪式这些仪式不断强化着尊卑长幼的伦理秩序普通民众"
+           "在日复一日的劳作中渐渐习惯了这套秩序不再追问为何生而不同周王室"
+           "用血缘与等级的双重纽带编织出一张覆盖天下的网")
+mw = gs._display_width(monster)
+exploded = gs._explode_long_words([W(monster, 10.0, dur=59.0)], gs.CUE_MAX_CHARS)
+check("巨型词被切成多片", len(exploded) > 5, str(len(exploded)))
+check("无一片超过 1.6 倍上限",
+      all(gs._display_width(e["word"]) <= gs.CUE_MAX_CHARS * 1.6 for e in exploded),
+      [gs._display_width(e["word"]) for e in exploded])
+check("切分后文本拼回原文", "".join(e["word"] for e in exploded) == monster)
+check("时间轴首尾保持", (exploded[0]["start"], exploded[-1]["end"]) == (10.0, 69.0),
+      (exploded[0]["start"], exploded[-1]["end"]))
+check("时间单调递增",
+      all(a["end"] <= b["start"] + 1e-6 for a, b in zip(exploded, exploded[1:])))
+check("总时长不变",
+      abs(sum(e["end"] - e["start"] for e in exploded) - 59.0) < 0.05,
+      str(sum(e["end"] - e["start"] for e in exploded)))
+
+# 走完整分段：不会再出现几十秒的巨型字幕
+cues_monster = gs._split_cues([W(monster, 10.0, dur=59.0)])
+check("巨型词经分段后无超长条",
+      all(c["end"] - c["start"] <= gs.CUE_MAX_DUR + 0.5 for c in cues_monster),
+      [(round(c["end"] - c["start"], 1), len(c["text"])) for c in cues_monster])
+check("巨型词经分段后无超宽条",
+      all(gs._display_width(c["text"]) <= gs.CUE_MAX_CHARS for c in cues_monster))
+
+# 正常短词不受影响
+check("正常词不被二次切分",
+      len(gs._explode_long_words([W("你好世界", 0.0)], 12)) == 1)
 
 print()
 if FAILED:

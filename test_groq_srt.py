@@ -182,8 +182,9 @@ def test_full_flow(tmpdir):
         sys.argv = argv
     text = open(srt, encoding="utf-8").read()
     # 词级时间戳：字幕结束取最后一个词的真实结束（2.480），不再是 segment 粗略结束（2.500）
+    # 末尾 cue 额外带 CUE_TAIL=0.10 余韵（5.000 -> 5.100）
     assert "1\n00:00:00,000 --> 00:00:02,480\n大家好，欢迎收看本期视频\n" in text, text
-    assert "2\n00:00:02,500 --> 00:00:05,000\n今天我们来聊聊命令行剪辑\n" in text, text
+    assert "2\n00:00:02,500 --> 00:00:05,100\n今天我们来聊聊命令行剪辑\n" in text, text
     assert not os.path.exists(os.path.join(tmpdir, "out.groq.m4a")), "临时 m4a 未清理"
 
 

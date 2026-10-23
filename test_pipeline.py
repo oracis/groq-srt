@@ -102,10 +102,10 @@ times = [(s["start"], s["end"]) for s in segs]
 
 # 去重：交界句子完整版只出现一次
 assert texts.count("交界句子完整版。") == 1, texts
-# 截断版被完整版替换：只保留 16.8-18.2 的完整时段
+# 截断版被完整版替换：只保留 16.8-18.2 的完整时段（终点 +0.1 余韵 CUE_TAIL）
 trunc = [s for s in segs if s["text"] == "交界句子被截断的半句"]
 assert len(trunc) == 1, trunc
-assert (trunc[0]["start"], trunc[0]["end"]) == (16.8, 18.2), trunc[0]
+assert (trunc[0]["start"], trunc[0]["end"]) == (16.8, 18.3), trunc[0]
 # 独有句保留
 assert "块1独有句。" in texts and "块2开头。" in texts and "中段。" in texts
 assert "正常句A。" in texts and "第二句。" in texts and "开场第一句。" in texts
@@ -114,10 +114,10 @@ starts = [s["start"] for s in segs]
 assert starts == sorted(starts), starts
 # offset 正确：块1独有句本地 7-9 + offset 12 = 全局 19-21
 i = texts.index("块1独有句。")
-assert (segs[i]["start"], segs[i]["end"]) == (19.0, 21.0), segs[i]
+assert (segs[i]["start"], segs[i]["end"]) == (19.0, 21.1), segs[i]
 # 块2 中段全局 30-32
 i = texts.index("中段。")
-assert (segs[i]["start"], segs[i]["end"]) == (30.0, 32.0), segs[i]
+assert (segs[i]["start"], segs[i]["end"]) == (30.0, 32.1), segs[i]
 print("[OK] 去重/替换/补缺/offset/时序 全部符合预期")
 
 # ---------- 小文件路径也带 prompt ----------
