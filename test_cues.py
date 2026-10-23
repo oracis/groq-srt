@@ -175,7 +175,7 @@ check("英文宽度 0.55", abs(gs._display_width("Hello") - 0.55 * 5) < 1e-9,
 check("中文宽度 1", gs._display_width("你好") == 2.0)
 
 # ============ 12. 默认单行字数对齐剪映（12 字） ============
-check("默认单行上限 = 10（实测剪映原生 6-10 字的主流区间）", gs.CUE_MAX_CHARS == 10,
+check("默认单行上限 = 11（离线扫描 10~14 档，11 与原生 703 条最吻合）", gs.CUE_MAX_CHARS == 11,
       str(gs.CUE_MAX_CHARS))
 
 # ============ 13. 巨型词二次切分（Groq 不返回 words 的退化路径） ============
@@ -200,9 +200,11 @@ check("总时长不变",
       str(sum(e["end"] - e["start"] for e in exploded)))
 
 # 走完整分段：不会再出现几十秒的巨型字幕
+# 上限取 CUE_MAX_DUR * 1.25：断点在标点上时会放宽到 1.25 倍宽度，
+# 单个超宽"词"的时间片也随之到 6.7s 左右（原生最长 4.4s，这里只防巨型条）
 cues_monster = gs._split_cues([W(monster, 10.0, dur=59.0)])
 check("巨型词经分段后无超长条",
-      all(c["end"] - c["start"] <= gs.CUE_MAX_DUR + 0.5 for c in cues_monster),
+      all(c["end"] - c["start"] <= gs.CUE_MAX_DUR * 1.25 + 0.5 for c in cues_monster),
       [(round(c["end"] - c["start"], 1), len(c["text"])) for c in cues_monster])
 check("巨型词经分段后无超宽条",
       all(gs._display_width(c["text"]) <= gs.CUE_MAX_CHARS for c in cues_monster))

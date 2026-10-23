@@ -66,10 +66,12 @@ DEFAULT_PROXY = "socks5h://127.0.0.1:10808"
 # 断句错位——即本脚本的"气口断开"。行业规范（多家剪辑指南一致）：
 # 每行 15-20 个汉字（横屏取上限）、每条 1-3 秒、话音停字幕即停。
 # 中文安全阅读速度约 4-6 字/秒，故 20 字配 6 秒上限。
-CUE_MAX_CHARS = 10                  # 单条字幕最大显示宽度（汉字计 1，英文计 0.55）
-# 实测剪映原生识别：老版平均 10.1 字/条（684 条样本，中位 9），新版开头
-# 更是切成 6+6+8 字。真正的断句主力是气口（见 _realign_words 的 brk 标记），
-# 这里的宽度上限只做兜底，10 字留给语义断句余量
+CUE_MAX_CHARS = 11                  # 单条字幕最大显示宽度（汉字计 1，英文计 0.55）
+# 实测剪映原生《众神》：703 条，中位 10 字、最长 16 字，13-16 字占 21%。
+# 离线扫描 10/11/12/13/14 五档（用落盘的 6452 个词重放，不调 API）：
+#   10 -> 748 条/均 9.2 字   11 -> 691 条/均 9.9 字   12 -> 644 条/均 10.6 字
+# 11 与原生 703 条/均 9.8 字/2.23s 逐项吻合，故取 11；断点落在标点上时
+# 再放宽到 1.25 倍（≈13 字，原生最长 16 字）
 CUE_MAX_DUR = 6.0                   # 单条最长秒数（超了观众会丢失同步感）
 CUE_MIN_DUR = 1.0                   # 单条最短秒数（太短会闪跳）
 BREAK_GAP = 0.6                     # 词间静音达到该值视为气口，断开（剪映停顿断句同思路）
@@ -784,7 +786,7 @@ def _split_cues(words, max_chars=CUE_MAX_CHARS, max_dur=CUE_MAX_DUR,
                     head, cur = cur[:cut + 1], cur[cut + 1:]
                     flush(head)
                 elif (any(c in t for c in _WEAK_PUNCT)
-                      and would_w <= max_chars * 1.3):
+                      and would_w <= max_chars * 1.25):
                     # 断点正好落在标点上：允许小幅超宽，别把词劈开
                     cur.append((t, ws, we))
                     flush()
@@ -1125,7 +1127,8 @@ def transcribe(audio_path, key, model, language, proxy=None, ffmpeg=None,
         merged = _align_words(merged, audio_path, ffmpeg, enabled=align)
         cues = _split_cues(merged, max_chars, max_dur)
         print("[ok] 智能分段: %d 个词 -> %d 条字幕" % (len(merged), len(cues)))
-        return {"segments": cues}
+        # words 一并返回：调断句参数时可以直接落盘重放，不必再调一次 API
+        return {"segments": cues, "words": merged}
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -1156,6 +1159,8 @@ def main():
                          "默认会测真实语音区间校正停顿漂移）")
     ap.add_argument("--keep", action="store_true", help="保留中间转码文件")
     ap.add_argument("--dry-run", action="store_true", help="只转码不上传（验证 ffmpeg 与体积）")
+    ap.add_argument("--dump-words", action="store_true",
+                    help="把词级时间戳落盘为 <输出>.words.json；调断句参数时可直接离线重放")
     ap.add_argument("--key", default=None, help="Groq API key（默认读 GROQ_API_KEY）")
     ap.add_argument("--proxy", default=None,
                     help="代理地址。默认 socks5h://127.0.0.1:10808（本机 Shadowsocks）；"
@@ -1206,6 +1211,13 @@ def main():
                       % (i, srt_ts(seg.get("start", 0)), srt_ts(seg.get("end", 0)), text))
     with open(out, "w", encoding="utf-8") as f:
         f.write("\n".join(blocks))
+
+    if args.dump_words and result.get("words"):
+        wpath = os.path.splitext(out)[0] + ".words.json"
+        with open(wpath, "w", encoding="utf-8") as f:
+            json.dump(result["words"], f, ensure_ascii=False)
+        print("[ok] 词级时间戳已落盘: %s（%d 个词，可离线重放调参）"
+              % (wpath, len(result["words"])))
 
     if not args.keep:
         try:
