@@ -209,6 +209,26 @@ check("巨型词经分段后无超长条",
 check("巨型词经分段后无超宽条",
       all(gs._display_width(c["text"]) <= gs.CUE_MAX_CHARS for c in cues_monster))
 
+# 回归：Whisper 常返回逐字时间戳，"词"退化成单字。此时宽度将超限若就地
+# 硬切，会把词劈开（实测《众神》开头切成"…解读全球好|书"）。正确做法是
+# 回头找 cur 内间隔最大的位置（"值→解"那 0.21s 换气），在那里断。
+_per_char = []
+_t = 0.0
+for _ch in "忠实传递价值":
+    _per_char.append(W(_ch, _t, 0.19))
+    _t += 0.19
+_t += 0.21                      # 换气
+for _ch in "解读全球好书":
+    _per_char.append(W(_ch, _t, 0.19))
+    _t += 0.19
+_cs_lb = gs._split_cues(_per_char, max_chars=11)
+check("逐字时间戳时在呼吸点断，不劈开「好|书」",
+      texts_of(_cs_lb)[0] == "忠实传递价值"
+      and not any(x.startswith("书") for x in texts_of(_cs_lb)),
+      texts_of(_cs_lb))
+check("回看切分不丢字",
+      "".join(texts_of(_cs_lb)) == "忠实传递价值解读全球好书", texts_of(_cs_lb))
+
 # 正常短词不受影响
 check("正常词不被二次切分",
       len(gs._explode_long_words([W("你好世界", 0.0)], 12)) == 1)
