@@ -90,6 +90,7 @@ MIN_CUE_WIDTH = 4                   # 单条最小显示宽度：低于此值的
 # 口播水词：剪映的断句引擎会忽略"嗯/啊"这类填充词周围的短停顿，不让它单独成条、
 # 也不在这里断句。同理：上一条以水词结尾时，跨越这个气口继续接下文。
 _FILLERS = set("嗯啊呃哦唉诶哎噢呀嘛吧呢哈")
+SOFT_GAP = 0.25                     # 软断点：短停顿 + 标点同时命中才切（剪映加权思路）
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -764,6 +765,12 @@ def _split_cues(words, max_chars=CUE_MAX_CHARS, max_dur=CUE_MAX_DUR,
                 flush()
             # 1) 气口断开（无 brk 标记时的退化判据）
             elif silence >= gap and cur_w >= 4:
+                flush()
+            # 2) 软断点：短停顿(0.25~气口阈值) + 标点 + 已积够半数宽度，三条
+            #    信号叠加到阈值以上才切——单看任何一条都不够（剪映的加权思路）
+            elif (silence >= SOFT_GAP
+                  and any(c in t for c in _STRONG_PUNCT + _WEAK_PUNCT)
+                  and cur_w >= max_chars * 0.5):
                 flush()
             # 4a) 宽度/时长兜底：先找 cue 内最近的逗号切点
             elif would_w > max_chars or (we - cur[0][1]) > max_dur:
