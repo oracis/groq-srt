@@ -27,6 +27,12 @@
       注入 Whisper prompt，从解码期就倾向正确词，不等出事后再正则替换
     - 跨切块上文：第 i 块的 prompt 带上第 i-1 块结尾文本，消除切块上下文
       断片（交界处不断思路）
+
+    字幕分段（词级时间戳 + 智能切分）：
+    - 请求 timestamp_granularities=word，拿每个词的 start/end
+    - _split_cues 按 句末标点 > 气口(词间静音>=0.7s) > 逗号(过半才断)
+      > 宽度/时长兜底 的优先级切条，单条默认 <=20 个汉字宽、<=7s
+    - 切块重叠区的词按 文本+时间双重重叠 判重去重（漏识的由另一块补上）
 """
 
 import argparse
@@ -54,6 +60,18 @@ OVERLAP_SEC = 3.0                   # 切块重叠秒数：每块头部带 3s �
 PROMPT_MAX_CHARS = 220              # Whisper prompt 上限约 448 token，中文 1 字≈1-1.5 token，保守截断
 PROMPT_TAIL_CHARS = 120             # 上一块结尾带入 prompt 的字符数
 DEFAULT_PROXY = "socks5h://127.0.0.1:10808"
+
+# ---- 字幕分段参数（依据剪映官方"按语音停顿断句"选项 + 行业字幕规范） ----
+# 剪映识别字幕官方提供「智能断句 / 按语音停顿断句」两种模式，后者专治
+# 断句错位——即本脚本的"气口断开"。行业规范（多家剪辑指南一致）：
+# 每行 15-20 个汉字（横屏取上限）、每条 1-3 秒、话音停字幕即停。
+# 中文安全阅读速度约 4-6 字/秒，故 20 字配 6 秒上限。
+CUE_MAX_CHARS = 20                  # 单条字幕最大显示宽度（汉字计 1，英文计 0.55）
+CUE_MAX_DUR = 6.0                   # 单条最长秒数（超了观众会丢失同步感）
+CUE_MIN_DUR = 1.0                   # 单条最短秒数（太短会闪跳）
+BREAK_GAP = 0.6                     # 词间静音达到该值视为气口，断开（剪映停顿断句同思路）
+STRONG_MIN_CHARS = 6                # 句末标点后断开的最小累计宽度
+WEAK_BREAK_RATIO = 0.55             # 逗号级断点：累计宽度达到上限该比例才断
 
 try:
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -554,6 +572,150 @@ def _merge_segments(all_segs):
     return kept
 
 
+# ---------- 词级时间戳 -> 字幕分段 ----------
+
+_STRONG_PUNCT = "。！？；…"
+_WEAK_PUNCT = "，、,;：:）)"
+_PUNCT_RE = re.compile(r"[\s，。！？；、,.!?;:：…（）()\"'“”‘’\-—]")
+
+
+def _display_width(text):
+    """字幕显示宽度：CJK/全角标点计 1，其余（英文数字）计 0.55。"""
+    w = 0.0
+    for ch in text:
+        w += 1.0 if ord(ch) > 0x2E80 else 0.55
+    return w
+
+
+def _norm_word(text):
+    """词文本归一化：去空白与标点，用于跨块同一词的判重。"""
+    return _PUNCT_RE.sub("", text or "")
+
+
+def _result_words(result):
+    """从 API 响应提取词级时间戳。
+
+    verbose_json + timestamp_granularities=word 时返回
+    words: [{word, start, end}, ...]；个别情况下没有 words 字段，
+    退化为把 segments 当整词（一条字幕=一段，分段器会原样保留）。
+    """
+    words = result.get("words")
+    if isinstance(words, list) and words:
+        return [{"word": w.get("word") or "", "start": float(w.get("start") or 0),
+                 "end": float(w.get("end") or 0)} for w in words]
+    segs = result.get("segments") or []
+    return [{"word": s.get("text") or "", "start": float(s.get("start") or 0),
+             "end": float(s.get("end") or 0)} for s in segs]
+
+
+def _merge_words(all_words):
+    """合并各块 words（已加全局 offset）：按时间排序，文本+时间双重重叠判重。
+
+    重叠切块会在交界处把同一句子转写两遍，词序列几乎一致：归一化文本相同
+    且时间区间显著重叠（>较短者一半）即判为同一词，保留一个并展宽时间范围
+    （两侧时间戳取并集，边界更稳）。只在一块出现的词原样保留=漏识补缺。
+    """
+    ws = [w for w in all_words if _norm_word(w.get("word"))]
+    ws.sort(key=lambda w: (w.get("start", 0), w.get("end", 0)))
+    kept = []
+    for w in ws:
+        dup_of = None
+        for j in range(len(kept) - 1, max(-1, len(kept) - 10), -1):
+            k = kept[j]
+            if _norm_word(k["word"]) != _norm_word(w["word"]):
+                continue
+            ov = min(k["end"], w["end"]) - max(k["start"], w["start"])
+            shorter = min(k["end"] - k["start"], w["end"] - w["start"])
+            if ov > 0.25 and shorter > 0 and ov > shorter * 0.5:
+                dup_of = j
+                break
+        if dup_of is None:
+            kept.append(dict(w))
+        else:  # 同一词的两份识别：时间范围取并集
+            k = kept[dup_of]
+            k["start"] = min(k["start"], w["start"])
+            k["end"] = max(k["end"], w["end"])
+    kept.sort(key=lambda w: (w.get("start", 0), w.get("end", 0)))
+    return kept
+
+
+def _split_cues(words, max_chars=CUE_MAX_CHARS, max_dur=CUE_MAX_DUR,
+                min_dur=CUE_MIN_DUR, gap=BREAK_GAP):
+    """把词级时间戳切成适合屏幕阅读的字幕条。
+
+    断开优先级（从高到低）：
+    1. 句末标点（。！？；…）——句子说完就断
+    2. 气口——词间静音 >= gap 秒（说话人换气/停顿）
+    3. 逗号级标点（，、：等）——累计宽度过半才断，避免碎句
+    4. 兜底——累计宽度/时长将超上限时，在最近的逗号处切；没有就硬切
+    每条 cue: start=首词 start，end=末词 end，text=拼接（去首尾空白）。
+    """
+    words = [w for w in words if (w.get("word") or "").strip()]
+    cues = []
+    cur = []  # [(word, start, end), ...]
+
+    def text_of(items):
+        return "".join(t for t, _, _ in items)
+
+    def flush(items=None):
+        nonlocal cur
+        if items is None:
+            items = cur
+            cur = []
+        if not items:
+            return
+        txt = text_of(items).strip()
+        if txt:
+            cues.append({"start": round(items[0][1], 3),
+                         "end": round(items[-1][2], 3), "text": txt})
+
+    for w in words:
+        t = (w.get("word") or "").strip()
+        ws, we = float(w.get("start") or 0), float(w.get("end") or 0)
+        if we < ws:  # 防御：个别词 end 缺失/倒挂
+            we = ws
+        if cur:
+            prev_end = cur[-1][2]
+            silence = ws - prev_end
+            cur_w = _display_width(text_of(cur))
+            would_w = cur_w + _display_width(t)
+            # 1) 气口断开
+            if silence >= gap and cur_w >= 4:
+                flush()
+            # 4a) 宽度/时长兜底：先找 cue 内最近的逗号切点
+            elif would_w > max_chars or (we - cur[0][1]) > max_dur:
+                cut = -1
+                for j in range(len(cur) - 1, -1, -1):
+                    ct = cur[j][0]
+                    if any(c in ct for c in _WEAK_PUNCT) and j >= 2:
+                        cut = j
+                        break
+                if cut >= 0:
+                    head, cur = cur[:cut + 1], cur[cut + 1:]
+                    flush(head)
+                else:
+                    flush()
+        cur.append((t, ws, we))
+        # 2) 句末标点：本词收尾整句
+        if any(c in t for c in _STRONG_PUNCT):
+            if _display_width(text_of(cur)) >= STRONG_MIN_CHARS or len(cur) > 1:
+                flush()
+        # 3) 逗号级：累计过半才断
+        elif any(c in t for c in _WEAK_PUNCT) \
+                and _display_width(text_of(cur)) >= max_chars * WEAK_BREAK_RATIO:
+            flush()
+    flush()
+
+    # 时长下限 + 防重叠：太短的条拉长到 min_dur，且不越过下一条起点
+    for i, c in enumerate(cues):
+        nxt = cues[i + 1]["start"] if i + 1 < len(cues) else None
+        if c["end"] - c["start"] < min_dur:
+            c["end"] = c["start"] + min_dur
+        if nxt is not None and c["end"] > nxt - 0.02:
+            c["end"] = max(c["start"] + 0.3, nxt - 0.02)
+    return cues
+
+
 def _upload_one(audio_path, key, model, language, proxy, prompt=None):
     """上传单个文件（调用方确保 <4MB），返回解析后的 JSON dict。"""
     boundary = "----groqsrt" + os.urandom(16).hex()
@@ -568,7 +730,9 @@ def _upload_one(audio_path, key, model, language, proxy, prompt=None):
     body = b""
     body += field("model", model)
     body += field("response_format", "verbose_json")
-    body += field("timestamp_granularities[]", "segment")
+    # 词级时间戳：segment 级一段可达几十秒，字幕会堆成一大块；
+    # 词级才能按标点/气口智能分段（_split_cues）
+    body += field("timestamp_granularities[]", "word")
     if language:
         body += field("language", language)
     if prompt:
@@ -595,8 +759,13 @@ def _upload_one(audio_path, key, model, language, proxy, prompt=None):
 
 
 def transcribe(audio_path, key, model, language, proxy=None, ffmpeg=None,
-               vocab=None, use_prompt=True, overlap=OVERLAP_SEC):
+               vocab=None, use_prompt=True, overlap=OVERLAP_SEC,
+               max_chars=CUE_MAX_CHARS, max_dur=CUE_MAX_DUR):
     """转录入口：小文件直接传；>4MB 自动切块（块间重叠 overlap 秒）逐块传。
+
+    流程：词级时间戳 -> 跨块合并去重（_merge_words）-> 智能分段
+    （_split_cues：句末标点/气口/逗号/宽度兜底）-> 返回 segments 形式的
+    cues（start/end/text），SRT 生成与草稿导入接口不变。
 
     vocab: 引导词表（正确写法，list 或分隔字符串）——注入 Whisper prompt，
             从事后正则热词变成解码期引导，专治同音词漂移。
@@ -610,7 +779,11 @@ def transcribe(audio_path, key, model, language, proxy=None, ffmpeg=None,
         prompt = build_prompt(vocab_text, None) if use_prompt else None
         if prompt:
             print("[..] 注入识别引导: %s" % prompt[:60])
-        return _upload_one(audio_path, key, model, language, proxy, prompt=prompt)
+        result = _upload_one(audio_path, key, model, language, proxy, prompt=prompt)
+        words = _result_words(result)
+        if not words:
+            die("API 未返回词级时间戳: " + json.dumps(result, ensure_ascii=False)[:300])
+        return {"segments": _split_cues(words, max_chars, max_dur)}
 
     # ---- 切块路径 ----
     n_chunks = -(-size // CHUNK_THRESHOLD)  # ceil
@@ -619,7 +792,7 @@ def transcribe(audio_path, key, model, language, proxy=None, ffmpeg=None,
     tmpdir = tempfile.mkdtemp(prefix="groq-srt-chunks-")
     try:
         chunks = split_audio(audio_path, tmpdir, n_chunks, ffmpeg, overlap=overlap)
-        all_segs = []
+        all_words = []
         prev_tail = ""
         for i, (fp, offset) in enumerate(chunks, 1):
             csz = os.path.getsize(fp)
@@ -629,22 +802,24 @@ def transcribe(audio_path, key, model, language, proxy=None, ffmpeg=None,
             if prompt:
                 print("[..] 注入识别引导: %s" % prompt[:60])
             result = _upload_one(fp, key, model, language, proxy, prompt=prompt)
-            segs = result.get("segments") or []
-            if not segs:
-                die("块 %d 未返回段落: %s"
+            words = _result_words(result)
+            if not words:
+                die("块 %d 未返回词级时间戳: %s"
                     % (i, json.dumps(result, ensure_ascii=False)[:200]))
-            for seg in segs:
-                seg["start"] = seg.get("start", 0) + offset
-                seg["end"] = seg.get("end", 0) + offset
-                all_segs.append(seg)
+            for w in words:
+                w["start"] = w.get("start", 0) + offset
+                w["end"] = w.get("end", 0) + offset
+                all_words.append(w)
             # 本块全部文本的结尾，作为下一块的 prompt 上文（跨切块不断片）
-            prev_tail = "".join((s.get("text") or "").strip()
-                                for s in segs)[-PROMPT_TAIL_CHARS:]
-            print("[ok] 块 %d/%d 完成，累计 %d 条段落" % (i, len(chunks), len(all_segs)))
-        merged = _merge_segments(all_segs)
-        if len(merged) < len(all_segs):
-            print("[ok] 重叠区去重: %d -> %d 条" % (len(all_segs), len(merged)))
-        return {"segments": merged}
+            prev_tail = "".join((w.get("word") or "").strip()
+                                for w in words)[-PROMPT_TAIL_CHARS:]
+            print("[ok] 块 %d/%d 完成，累计 %d 个词" % (i, len(chunks), len(all_words)))
+        merged = _merge_words(all_words)
+        if len(merged) < len(all_words):
+            print("[ok] 重叠区去重: %d -> %d 个词" % (len(all_words), len(merged)))
+        cues = _split_cues(merged, max_chars, max_dur)
+        print("[ok] 智能分段: %d 个词 -> %d 条字幕" % (len(merged), len(cues)))
+        return {"segments": cues}
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
 
@@ -665,6 +840,11 @@ def main():
                     help="禁用 prompt 引导（含跨切块上文续接，默认开启）")
     ap.add_argument("--overlap", type=float, default=OVERLAP_SEC,
                     help="切块重叠秒数（默认 %.1f，0=不重叠）" % OVERLAP_SEC)
+    ap.add_argument("--max-chars", type=int, default=CUE_MAX_CHARS,
+                    help="单条字幕最大显示宽度，汉字计 1 英文计 0.55"
+                         "（默认 %d，约 16:9 屏幕一行）" % CUE_MAX_CHARS)
+    ap.add_argument("--max-dur", type=float, default=CUE_MAX_DUR,
+                    help="单条字幕最长秒数（默认 %.1f）" % CUE_MAX_DUR)
     ap.add_argument("--keep", action="store_true", help="保留中间转码文件")
     ap.add_argument("--dry-run", action="store_true", help="只转码不上传（验证 ffmpeg 与体积）")
     ap.add_argument("--key", default=None, help="Groq API key（默认读 GROQ_API_KEY）")
@@ -702,7 +882,8 @@ def main():
     preflight(key, proxy)
     result = transcribe(tmp, key, args.model, args.language, proxy, ffmpeg=ffmpeg,
                         vocab=args.vocab, use_prompt=not args.no_prompt,
-                        overlap=args.overlap)
+                        overlap=args.overlap, max_chars=args.max_chars,
+                        max_dur=args.max_dur)
     segs = result.get("segments") or []
     if not segs:
         die("API 未返回段落: " + json.dumps(result, ensure_ascii=False)[:300])
