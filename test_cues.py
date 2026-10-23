@@ -289,6 +289,30 @@ check("前方气口超出窗口 -> 不等", gs._brk_ahead(_far, 0, 3, 16.5) is F
 _tail = [W("啊", 0.0, 0.2)]
 check("已到末尾 -> 不等", gs._brk_ahead(_tail, 0, 3, 16.5) is False)
 
+# ---------------------------------------------------------------- 词边界约束
+# 实测旧版 683 个切点里 141 个（20.6%）劈在词内部：大英博|物馆、力|量、保|命、
+# 野|蛮、横|跨。Whisper 只给逐字时间戳，没有词边界，必须靠词表补。
+print("\n[wordcut] 词边界约束（断词问题）")
+_ws = gs._load_wordset()
+check("词表已加载", len(_ws) > 50000, "%d 词" % len(_ws))
+check("「大英博物馆」内部不可切（可切位只有 大英|博物馆）",
+      [i for i, x in enumerate(gs._cut_flags("大英博物馆")) if x] == [0, 2, 5],
+      [i for i, x in enumerate(gs._cut_flags("大英博物馆")) if x])
+check("「保命」内部不可切",
+      gs._cut_flags("保命的")[1] is False and gs._cut_flags("保命的")[2] is True)
+check("词表缺失时全可切（退化不崩）",
+      all(gs._cut_flags("任意一段中文", frozenset())) and gs._cut_flags("") == [True])
+
+# 端到端：复现"保"在条尾、"命"在条首
+_bo = "这些不能吃不能穿保命的在事功利"
+_cs_bo = gs._split_cues([W(c, 0.30 * i, 0.25) for i, c in enumerate(_bo)],
+                        max_chars=11)
+_joined = texts_of(_cs_bo)
+check("「保命」不会被拆到两条",
+      not any(a.endswith("保") and b.startswith("命")
+              for a, b in zip(_joined, _joined[1:])), _joined)
+check("断词修复后不丢字", "".join(_joined) == _bo, _joined)
+
 print()
 if FAILED:
     print("=== 存在失败项 ===")
