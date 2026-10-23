@@ -211,6 +211,18 @@ check("巨型词经分段后无超宽条",
 check("正常词不被二次切分",
       len(gs._explode_long_words([W("你好世界", 0.0)], 12)) == 1)
 
+# 回归：巨型词二次切分后，各片 + 余韵 CUE_TAIL 曾互相压住
+# （实测《众神》464.4s 处三条 0.2s 碎条重叠，剪映里是肉眼可见的糊字）
+_long = W("让人在精神自救的人的力量与气魄架接到人的身体之上在精神世界里", 464.40, 0.90)
+_next = W("继续", 465.30, 0.30)
+_ov = gs._split_cues([_long, _next], max_chars=10)
+check("巨型词切分后各条不重叠",
+      all(_ov[i]["end"] <= _ov[i + 1]["start"] + 1e-9 for i in range(len(_ov) - 1)),
+      [(round(c["start"], 2), round(c["end"], 2)) for c in _ov])
+check("巨型词切分后不丢字",
+      "".join(c["text"] for c in _ov) == "让人在精神自救的人的力量与气魄架接到人的身体之上在精神世界里继续",
+      texts_of(_ov))
+
 print()
 if FAILED:
     print("=== 存在失败项 ===")
