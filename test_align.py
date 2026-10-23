@@ -80,7 +80,9 @@ def run_module(name, m4a):
 
     # ---------- 2. 基线：不对齐时字幕什么样（复现故障） ----------
     print("\n[2] 基线（不对齐 = 修复前的行为）")
-    base_cues = mod._split_cues(drifted_words(), max_chars=20)
+    # 基线只考察"按 20 字硬切"这一条，所以把时长上限放开，
+    # 否则会先被 CUE_MAX_DUR=4.5s 的兜底切掉，测的就不是宽度行为了
+    base_cues = mod._split_cues(drifted_words(), max_chars=20, max_dur=99)
     print("      -> %d 条: %s" % (len(base_cues), [c["text"] for c in base_cues]))
     check("漂移词表被切成 2 条（20字硬切），不是 3 条", len(base_cues) == 2,
           [c["text"] for c in base_cues])

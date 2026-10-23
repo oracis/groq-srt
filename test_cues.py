@@ -245,6 +245,50 @@ check("巨型词切分后不丢字",
       "".join(c["text"] for c in _ov) == "让人在精神自救的人的力量与气魄架接到人的身体之上在精神世界里继续",
       texts_of(_ov))
 
+# ---------------------------------------------------------------- 时间戳畸形修正
+# 实测《众神》词表里 2 处 Whisper 时间戳错乱：单字「这」跨 6.96s、「一」跨 2.07s。
+# 不修的话该词会把后面十几个词整个盖住，导致重叠 -> 防重叠硬钳 -> 0.18s 闪读。
+print("\n[sanitize] 词时间戳畸形修正与单调化")
+_bad = [
+    W("猎", 435.30, 0.11),
+    W("这", 435.35, 6.96),      # 畸形：单字跨近 7 秒
+    W("觅", 435.63, 0.20),
+    W("食", 435.83, 0.16),
+    W("种", 436.32, 0.09),
+]
+_fix = gs._sanitize_words(_bad, 4.5)
+check("畸形词跨度被收窄到 SPAN_FIX 以内",
+      _fix[1]["end"] - _fix[1]["start"] <= gs.SPAN_FIX + 1e-6,
+      "%.2fs" % (_fix[1]["end"] - _fix[1]["start"]))
+check("修正后不再盖住后续词",
+      all(_fix[i]["end"] <= _fix[i + 1]["start"] + 1e-6 for i in range(len(_fix) - 1)),
+      [(round(w["start"], 2), round(w["end"], 2)) for w in _fix])
+check("正常词不被改动",
+      _fix[0]["start"] == 435.30 and abs(_fix[0]["end"] - 435.41) < 1e-6,
+      (_fix[0]["start"], _fix[0]["end"]))
+
+_mono = gs._sanitize_words([W("甲", 1.00, 0.30), W("乙", 1.10, 0.30)], 4.5)
+check("词间重叠被单调化抹平",
+      _mono[1]["start"] >= _mono[0]["end"] - 1e-9,
+      [(w["start"], w["end"]) for w in _mono])
+check("单调化不产生负时长",
+      all(w["end"] > w["start"] for w in _mono), [(w["start"], w["end"]) for w in _mono])
+check("空输入不崩", gs._sanitize_words([], 4.5) == [])
+
+# ---------------------------------------------------------------- 前瞻等气口
+# 剪映原生 21% 的条落在 13~16 字：一口气没换气就让它读完。我们的 11 字硬上限
+# 会把这种长句劈成两条，所以宽度将超限时先看前方几词内有没有气口。
+print("\n[brk_ahead] 前瞻判断")
+_nb = [W("啊", 0.0, 0.2), W("吧", 0.2, 0.2)]
+check("前方无气口 -> 不等", gs._brk_ahead(_nb, 0, 3, 16.5) is False)
+_yes = [W("啊", 0.0, 0.2), {"word": "吧", "start": 0.5, "end": 0.7, "brk": True}]
+check("前方 1 词内有气口且不超宽 -> 等",
+      gs._brk_ahead(_yes, 0, 3, 16.5) is True)
+_far = [W("啊", 0.0, 0.2)] + [W("很长很长的词"[:2], 0.4 + i * 0.2) for i in range(6)]
+check("前方气口超出窗口 -> 不等", gs._brk_ahead(_far, 0, 3, 16.5) is False)
+_tail = [W("啊", 0.0, 0.2)]
+check("已到末尾 -> 不等", gs._brk_ahead(_tail, 0, 3, 16.5) is False)
+
 print()
 if FAILED:
     print("=== 存在失败项 ===")
